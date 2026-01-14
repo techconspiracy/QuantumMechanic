@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QuantumMechanic Kanban</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-200 font-sans">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        const GITHUB_RAW_URL = "https://raw.githubusercontent.com/techconspiracy/QuantumMechanic/main/Prompts.DevNotes/implementation_framework.md";
+        const REPO_OWNER = "techconspiracy";
+        const REPO_NAME = "QuantumMechanic";
+        const FILE_PATH = "Prompts.DevNotes/implementation_framework.md";
+
+        function KanbanApp() {
+            const [board, setBoard] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [token, setToken] = useState(localStorage.getItem('gh_token') || '');
+
+            useEffect(() => {
+                fetchMarkdown();
+            }, []);
+
+            const fetchMarkdown = async () => {
+                setLoading(true);
+                try {
+                    const res = await fetch(GITHUB_RAW_URL);
+                    const text = await res.text();
+                    parseMarkdown(text);
+                } catch (err) {
+                    console.error("Fetch error:", err);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const parseMarkdown = (text) => {
+                const lines = text.split('\n');
+                const columns = [];
+                let currentColumn = null;
+
+                lines.forEach(line => {
+                    // Match H2 Headers as columns
+                    if (line.startsWith('## ')) {
+                        currentColumn = { title: line.replace('## ', '').trim(), tasks: [] };
+                        columns.push(currentColumn);
+                    } 
+                    // Match checklist items as tasks
+                    else if (line.trim().startsWith('- [') && currentColumn) {
+                        const completed = line.includes('[x]');
+                        const content = line.split('] ')[1];
+                        currentColumn.tasks.push({ content, completed });
+                    }
+                });
+                setBoard(columns);
+            };
+
+            const updateStatus = (colIndex, taskIndex) => {
+                const newBoard = [...board];
+                newBoard[colIndex].tasks[taskIndex].completed = !newBoard[colIndex].tasks[taskIndex].completed;
+                setBoard(newBoard);
+                // In a full implementation, you'd trigger commitToGithub(newBoard) here
+            };
+
+            if (loading) return <div class="p-10 text-center">Loading Quantum Framework...</div>;
+
+            return (
+                <div className="p-8">
+                    <header className="flex justify-between items-center mb-8 border-b border-slate-800 pb-4">
+                        <h1 className="text-2xl font-bold text-cyan-400 tracking-widest">QUANTUM_MECHANIC // KANBAN</h1>
+                        <input 
+                            type="password" 
+                            placeholder="Paste GH Token to Save" 
+                            className="bg-slate-900 border border-slate-700 p-2 rounded text-xs w-64"
+                            value={token}
+                            onChange={(e) => { setToken(e.target.value); localStorage.setItem('gh_token', e.target.value); }}
+                        />
+                    </header>
+
+                    <div className="flex gap-6 overflow-x-auto pb-6">
+                        {board.map((col, cIdx) => (
+                            <div key={cIdx} className="bg-slate-900/50 border border-slate-800 rounded-xl p-4 min-w-[300px] flex-shrink-0">
+                                <h2 className="text-cyan-500 font-mono text-sm mb-4 uppercase tracking-tighter italic">{col.title}</h2>
+                                <div className="space-y-3">
+                                    {col.tasks.map((task, tIdx) => (
+                                        <div 
+                                            key={tIdx} 
+                                            onClick={() => updateStatus(cIdx, tIdx)}
+                                            className={`p-4 rounded-lg border transition-all cursor-pointer ${
+                                                task.completed 
+                                                ? 'bg-slate-800/30 border-slate-700 opacity-50' 
+                                                : 'bg-slate-800 border-slate-700 hover:border-cyan-500'
+                                            }`}
+                                        >
+                                            <div className="flex items-start gap-3">
+                                                <div className={`mt-1 w-4 h-4 rounded-sm border ${task.completed ? 'bg-cyan-500 border-cyan-500' : 'border-slate-500'}`}>
+                                                    {task.completed && <svg viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="4"><path d="M20 6L9 17L4 12" /></svg>}
+                                                </div>
+                                                <span className="text-sm leading-tight">{task.content}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<KanbanApp />);
+    </script>
+</body>
+</html>
