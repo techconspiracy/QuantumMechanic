@@ -1,3 +1,4 @@
+
 #if UNITY_EDITOR
 using UnityEngine;
 using UnityEditor;
@@ -8,7 +9,7 @@ namespace QuantumMechanic.Editor
 {
     /// <summary>
     /// The Apple-Style "Automator" - Self-Bootstrapping Project Initializer.
-    /// Single-click setup for the entire Mini-MORPG project.
+    /// Single-click setup for the entire Mini-MORPG project. from scratch. this bootstrapper was the original and all implementations should be reworked in the Apple-Style "Automator" style! <-CRITICAL 
     /// Generates folder structure, scenes, prefabs, materials, and hooks all systems together.
     /// This is the "magic button" that transforms an empty Unity project into a playable game.
     /// </summary>
