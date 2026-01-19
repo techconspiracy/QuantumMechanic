@@ -1,17 +1,19 @@
-// USER EDITABLE FILE - Add your custom logic here
+// File: Assets/Scripts/RPG/Modules/HealthModule_WebSocket.cs
+// REFACTORED VERSION - Works with WebSocket networking instead of NGO
 
-using Unity.Netcode;
 using UnityEngine;
-using System.Collections.Generic;
+using RPG.Core;
+using RPG.Contracts;
+using RPG.Networking;
+using System;
 
 namespace RPG.Modules
 {
     /// <summary>
-    /// Custom logic for HealthModule with Voronoi-based destruction on death.
-    /// This partial class extends the generated base WITHOUT redeclaring interface methods.
-    /// Instead, we add helper methods and hook into Unity lifecycle events.
+    /// Health system refactored for WebSocket networking.
+    /// Syncs health state via custom messages instead of NetworkVariables.
     /// </summary>
-    public partial class HealthModule
+    public class HealthModule : BaseNetworkModule, IDamageable, IResourcePool
     {
         [Header("Health Configuration")]
         [SerializeField] private float _maxHealth = 100f;
@@ -19,287 +21,258 @@ namespace RPG.Modules
         [SerializeField] private bool _canRegenerate = false;
         [SerializeField] private float _regenerationRate = 5f;
         [SerializeField] private float _regenerationDelay = 3f;
-        
-        [Header("Voronoi Destruction Settings")]
-        [SerializeField] private int _voronoiSites = 15;
-        [SerializeField] private float _explosionForce = 300f;
-        [SerializeField] private float _explosionRadius = 5f;
-        [SerializeField] private float _fragmentLifetime = 5f;
-        [SerializeField] private Material _fragmentMaterial;
-        
+
         [Header("Visual Feedback")]
         [SerializeField] private GameObject _deathVFX;
         [SerializeField] private AudioClip _deathSound;
         [SerializeField] private AudioClip _damageSound;
-        
+
+        // State (replaces NetworkVariables)
+        private float _currentHealth;
+        private float _currentMaxHealth;
+        private bool _isDead;
         private float _timeSinceLastDamage;
-        private MeshFilter _meshFilter;
-        private MeshRenderer _meshRenderer;
+
         private AudioSource _audioSource;
-        private bool _hasProcessedDeath;
+        private MeshRenderer _meshRenderer;
+
+        // Events for UI binding
+        public event Action<float, float> OnHealthChanged; // (current, max)
+        public event Action OnDeath;
+
+        #region IResourcePool Implementation
+
+        public float CurrentValue => _currentHealth;
+        public float MaxValue => _currentMaxHealth;
+
+        public void ModifyResource(float delta)
+        {
+            if (!IsOwner) return; // Only owner modifies
+
+            float newHealth = Mathf.Clamp(_currentHealth + delta, 0, _currentMaxHealth);
+            
+            if (Mathf.Abs(newHealth - _currentHealth) > 0.01f)
+            {
+                _currentHealth = newHealth;
+                OnHealthChanged?.Invoke(_currentHealth, _currentMaxHealth);
+                SyncHealthToServer();
+
+                if (_currentHealth <= 0 && !_isDead)
+                {
+                    Die();
+                }
+            }
+        }
+
+        public void SetMaxValue(float newMax)
+        {
+            if (!IsOwner) return;
+
+            _currentMaxHealth = Mathf.Max(0, newMax);
+            _currentHealth = Mathf.Min(_currentHealth, _currentMaxHealth);
+            OnHealthChanged?.Invoke(_currentHealth, _currentMaxHealth);
+            SyncHealthToServer();
+        }
+
+        #endregion
+
+        #region IDamageable Implementation
+
+        public bool IsDead => _isDead;
+
+        public void TakeDamage(float amount, ulong attackerId)
+        {
+            if (_isDead) return;
+
+            _timeSinceLastDamage = 0f;
+            ModifyResource(-amount);
+
+            // Play damage feedback
+            if (_damageSound != null && _audioSource != null)
+            {
+                _audioSource.PlayOneShot(_damageSound);
+            }
+
+            LogInfo($"Took {amount} damage from {attackerId}. Health: {_currentHealth}/{_currentMaxHealth}");
+        }
+
+        #endregion
+
+        #region Unity Lifecycle
 
         private void Awake()
         {
-            // Cache components
-            _meshFilter = GetComponent<MeshFilter>();
-            _meshRenderer = GetComponent<MeshRenderer>();
             _audioSource = GetComponent<AudioSource>();
-
             if (_audioSource == null)
             {
                 _audioSource = gameObject.AddComponent<AudioSource>();
                 _audioSource.spatialBlend = 1f;
             }
+
+            _meshRenderer = GetComponent<MeshRenderer>();
         }
 
-        public override void OnNetworkSpawn()
+        protected override void Start()
         {
-            base.OnNetworkSpawn();
-            
-            if (IsServer)
-            {
-                // Initialize NetworkVariables
-                _currentValue.Value = _startingHealth;
-                _maxValue.Value = _maxHealth;
-                _isDead.Value = false;
-            }
+            base.Start();
 
-            _timeSinceLastDamage = 0f;
-            _hasProcessedDeath = false;
-            
-            // Subscribe to death state changes
-            _isDead.OnValueChanged += OnDeathStateChanged;
-        }
+            // Initialize health
+            _currentHealth = _startingHealth;
+            _currentMaxHealth = _maxHealth;
+            _isDead = false;
 
-        public override void OnNetworkDespawn()
-        {
-            _isDead.OnValueChanged -= OnDeathStateChanged;
-            base.OnNetworkDespawn();
-        }
-
-        private void OnDeathStateChanged(bool previousValue, bool newValue)
-        {
-            if (newValue && !_hasProcessedDeath)
-            {
-                _hasProcessedDeath = true;
-                TriggerVoronoiDestructionClientRpc();
-            }
+            OnHealthChanged?.Invoke(_currentHealth, _currentMaxHealth);
         }
 
         private void Update()
         {
-            if (!IsServer || _isDead.Value) return;
+            if (!IsOwner || _isDead) return;
 
-            // Handle health regeneration
-            if (_canRegenerate && _currentValue.Value < _maxValue.Value)
+            // Handle regeneration
+            if (_canRegenerate && _currentHealth < _currentMaxHealth)
             {
                 _timeSinceLastDamage += Time.deltaTime;
 
                 if (_timeSinceLastDamage >= _regenerationDelay)
                 {
-                    // Use the base ModifyResource from generated file
-                    float delta = _regenerationRate * Time.deltaTime;
-                    _currentValue.Value = Mathf.Clamp(_currentValue.Value + delta, 0, _maxValue.Value);
+                    ModifyResource(_regenerationRate * Time.deltaTime);
                 }
             }
         }
 
-        // Hook that gets called by external systems (like combat)
-        public void ApplyDamage(float amount, ulong attackerId)
-        {
-            if (!IsServer || _isDead.Value) return;
+        #endregion
 
-            _timeSinceLastDamage = 0f;
+        #region Network Synchronization
+
+        private void SyncHealthToServer()
+        {
+            if (!IsOwner) return;
+
+            var healthData = new HealthSyncData
+            {
+                currentHealth = _currentHealth,
+                maxHealth = _currentMaxHealth,
+                isDead = _isDead
+            };
+
+            SendNetworkMessage(
+                MessageType.ResourceUpdate,
+                JsonUtility.ToJson(healthData)
+            );
+        }
+
+        protected override void HandleNetworkMessage(NetworkMessage message)
+        {
+            base.HandleNetworkMessage(message);
+
+            // Remote players receive health updates
+            if (message.messageType == MessageType.ResourceUpdate && !IsOwner)
+            {
+                if (!string.IsNullOrEmpty(message.payload))
+                {
+                    HealthSyncData data = JsonUtility.FromJson<HealthSyncData>(message.payload);
+                    
+                    _currentHealth = data.currentHealth;
+                    _currentMaxHealth = data.maxHealth;
+                    
+                    if (data.isDead && !_isDead)
+                    {
+                        _isDead = true;
+                        PlayDeathEffects();
+                    }
+
+                    OnHealthChanged?.Invoke(_currentHealth, _currentMaxHealth);
+                }
+            }
+        }
+
+        #endregion
+
+        #region Death Handling
+
+        private void Die()
+        {
+            _isDead = true;
+            OnDeath?.Invoke();
             
-            // Modify health
-            float newHealth = Mathf.Clamp(_currentValue.Value - amount, 0, _maxValue.Value);
-            _currentValue.Value = newHealth;
-
-            // Broadcast damage feedback
-            PlayDamageFeedbackClientRpc();
-
-            // Check for death
-            if (newHealth <= 0 && !_isDead.Value)
-            {
-                _isDead.Value = true;
-                Debug.Log($"[Server] Entity destroyed by client {attackerId}");
-            }
+            LogInfo("Entity died!");
+            
+            // Sync death to server
+            SyncHealthToServer();
+            
+            // Play death effects
+            PlayDeathEffects();
         }
 
-        [ClientRpc]
-        private void PlayDamageFeedbackClientRpc()
+        private void PlayDeathEffects()
         {
-            if (_damageSound != null && _audioSource != null)
-            {
-                _audioSource.PlayOneShot(_damageSound);
-            }
-        }
-
-        [ClientRpc]
-        private void TriggerVoronoiDestructionClientRpc()
-        {
+            // VFX
             if (_deathVFX != null)
             {
                 Instantiate(_deathVFX, transform.position, transform.rotation);
             }
 
+            // SFX
             if (_deathSound != null && _audioSource != null)
             {
                 _audioSource.PlayOneShot(_deathSound);
             }
 
-            // Perform Voronoi destruction
-            if (_meshFilter != null && _meshFilter.mesh != null)
-            {
-                PerformVoronoiDestruction();
-            }
-
-            // Hide original mesh
+            // Hide mesh
             if (_meshRenderer != null)
             {
                 _meshRenderer.enabled = false;
             }
 
-            // Cleanup after fragments despawn
-            if (IsServer)
+            // Destroy after delay (or handle respawn)
+            if (IsOwner)
             {
-                Destroy(gameObject, _fragmentLifetime + 1f);
+                Destroy(gameObject, 5f);
             }
         }
 
-        private void PerformVoronoiDestruction()
+        #endregion
+
+        #region Public API
+
+        /// <summary>
+        /// Heal the entity by a specific amount
+        /// </summary>
+        public void Heal(float amount)
         {
-            Mesh originalMesh = _meshFilter.mesh;
-            Vector3[] vertices = originalMesh.vertices;
-            int[] triangles = originalMesh.triangles;
-            Vector3[] normals = originalMesh.normals;
-            Vector2[] uvs = originalMesh.uv;
-
-            // Generate random Voronoi sites within mesh bounds
-            Bounds bounds = originalMesh.bounds;
-            List<Vector3> voronoiSites = GenerateVoronoiSites(bounds, _voronoiSites);
-
-            // Group triangles by closest Voronoi site
-            Dictionary<int, List<int>> siteTriangles = new Dictionary<int, List<int>>();
-            for (int i = 0; i < voronoiSites.Count; i++)
-            {
-                siteTriangles[i] = new List<int>();
-            }
-
-            for (int i = 0; i < triangles.Length; i += 3)
-            {
-                Vector3 triangleCenter = (vertices[triangles[i]] + vertices[triangles[i + 1]] + vertices[triangles[i + 2]]) / 3f;
-                int closestSite = FindClosestSite(triangleCenter, voronoiSites);
-                siteTriangles[closestSite].Add(i);
-            }
-
-            // Create fragment GameObject for each Voronoi region
-            Vector3 explosionCenter = transform.position;
-
-            foreach (var kvp in siteTriangles)
-            {
-                if (kvp.Value.Count == 0) continue;
-
-                CreateFragment(kvp.Key, kvp.Value, vertices, triangles, normals, uvs, voronoiSites, explosionCenter);
-            }
+            ModifyResource(amount);
         }
 
-        private List<Vector3> GenerateVoronoiSites(Bounds bounds, int count)
+        /// <summary>
+        /// Instantly kill the entity (for admin/debug)
+        /// </summary>
+        public void Kill()
         {
-            List<Vector3> sites = new List<Vector3>();
-            for (int i = 0; i < count; i++)
+            if (!_isDead)
             {
-                Vector3 site = new Vector3(
-                    Random.Range(bounds.min.x, bounds.max.x),
-                    Random.Range(bounds.min.y, bounds.max.y),
-                    Random.Range(bounds.min.z, bounds.max.z)
-                );
-                sites.Add(site);
+                _currentHealth = 0;
+                Die();
             }
-            return sites;
         }
 
-        private int FindClosestSite(Vector3 point, List<Vector3> sites)
+        /// <summary>
+        /// Fully restore health
+        /// </summary>
+        public void FullHeal()
         {
-            int closest = 0;
-            float minDist = float.MaxValue;
-
-            for (int i = 0; i < sites.Count; i++)
-            {
-                float dist = Vector3.SqrMagnitude(point - sites[i]);
-                if (dist < minDist)
-                {
-                    minDist = dist;
-                    closest = i;
-                }
-            }
-
-            return closest;
+            _currentHealth = _currentMaxHealth;
+            OnHealthChanged?.Invoke(_currentHealth, _currentMaxHealth);
+            SyncHealthToServer();
         }
 
-        private void CreateFragment(int siteIndex, List<int> triangleIndices, Vector3[] vertices, int[] triangles, 
-                                     Vector3[] normals, Vector2[] uvs, List<Vector3> voronoiSites, Vector3 explosionCenter)
-        {
-            // Create new mesh for fragment
-            Mesh fragmentMesh = new Mesh();
-            List<Vector3> fragVerts = new List<Vector3>();
-            List<int> fragTris = new List<int>();
-            List<Vector3> fragNormals = new List<Vector3>();
-            List<Vector2> fragUVs = new List<Vector2>();
-            Dictionary<int, int> vertexMap = new Dictionary<int, int>();
+        #endregion
+    }
 
-            foreach (int triIndex in triangleIndices)
-            {
-                for (int i = 0; i < 3; i++)
-                {
-                    int vertIndex = triangles[triIndex + i];
-                    
-                    if (!vertexMap.ContainsKey(vertIndex))
-                    {
-                        vertexMap[vertIndex] = fragVerts.Count;
-                        fragVerts.Add(vertices[vertIndex]);
-                        fragNormals.Add(normals.Length > vertIndex ? normals[vertIndex] : Vector3.up);
-                        fragUVs.Add(uvs.Length > vertIndex ? uvs[vertIndex] : Vector2.zero);
-                    }
-
-                    fragTris.Add(vertexMap[vertIndex]);
-                }
-            }
-
-            fragmentMesh.vertices = fragVerts.ToArray();
-            fragmentMesh.triangles = fragTris.ToArray();
-            fragmentMesh.normals = fragNormals.ToArray();
-            fragmentMesh.uv = fragUVs.ToArray();
-            fragmentMesh.RecalculateBounds();
-
-            // Create GameObject for fragment
-            GameObject fragment = new GameObject($"Fragment_{siteIndex}");
-            fragment.transform.position = transform.TransformPoint(voronoiSites[siteIndex]);
-            fragment.transform.rotation = transform.rotation;
-            fragment.transform.localScale = transform.localScale;
-
-            MeshFilter mf = fragment.AddComponent<MeshFilter>();
-            mf.mesh = fragmentMesh;
-
-            MeshRenderer mr = fragment.AddComponent<MeshRenderer>();
-            mr.material = _fragmentMaterial != null ? _fragmentMaterial : _meshRenderer.material;
-
-            MeshCollider mc = fragment.AddComponent<MeshCollider>();
-            mc.convex = true;
-
-            Rigidbody rb = fragment.AddComponent<Rigidbody>();
-            rb.mass = 1f;
-            rb.linearDamping = 0.5f;
-            rb.angularDamping = 0.5f;
-
-            // Apply explosion force
-            Vector3 explosionDir = (fragment.transform.position - explosionCenter).normalized;
-            float randomForce = Random.Range(0.7f, 1.3f) * _explosionForce;
-            rb.AddForce(explosionDir * randomForce + Vector3.up * (randomForce * 0.3f), ForceMode.Impulse);
-            rb.AddTorque(Random.insideUnitSphere * randomForce * 0.1f, ForceMode.Impulse);
-
-            // Schedule destruction
-            Destroy(fragment, _fragmentLifetime);
-        }
+    [Serializable]
+    public class HealthSyncData
+    {
+        public float currentHealth;
+        public float maxHealth;
+        public bool isDead;
     }
 }

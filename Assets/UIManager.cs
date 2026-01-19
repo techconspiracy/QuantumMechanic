@@ -37,7 +37,7 @@ namespace RPG.UI
         [SerializeField] private UIPanelType _startingPanel = UIPanelType.HUD;
 
         private HealthModule _localHealth;
-        private EconomyModule _localEconomy;
+        /// private EconomyModule _localEconomy;
 
         private void Awake()
         {
@@ -104,18 +104,18 @@ namespace RPG.UI
             }
 
             // 2. Bind Economy
-            if (player.TryGetComponent(out _localEconomy))
-            {
-                UpdateGoldUI(_localEconomy.CurrentValue);
-                _localEconomy.OnCurrencyChanged += UpdateGoldUI;
-            }
+  //          if (player.TryGetComponent(out _localEconomy))
+  //          {
+  //              UpdateGoldUI(_localEconomy.CurrentValue);
+  //              _localEconomy.OnCurrencyChanged += UpdateGoldUI;
+  //          }
 
             Debug.Log("[UI Manager] Successfully bound to Local Player Modules.");
         }
 
         private void UnbindPlayerEvents()
         {
-            if (_localEconomy != null) _localEconomy.OnCurrencyChanged -= UpdateGoldUI;
+//            if (_localEconomy != null) _localEconomy.OnCurrencyChanged -= UpdateGoldUI;
         }
 
         #region HUD Updates
@@ -126,10 +126,10 @@ namespace RPG.UI
             if (_healthText) _healthText.text = $"{Mathf.CeilToInt(current)} / {max}";
         }
 
-        public void UpdateGoldUI(float amount)
-        {
-            if (_goldText) _goldText.text = amount.ToString("N0");
-        }
+//        public void UpdateGoldUI(float amount)
+//        {
+//            if (_goldText) _goldText.text = amount.ToString("N0");
+//        }
 
         #endregion
 
